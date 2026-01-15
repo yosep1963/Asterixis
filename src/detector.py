@@ -108,20 +108,50 @@ class RealtimeDetector:
         - 25-50: Grade 1 (Mild)
         - 50-75: Grade 2 (Moderate)
         - 75-100: Grade 3 (Severe)
+
+        Grade는 mean_velocity 기반으로 판별 (실제 데이터 분석 결과):
+        - Normal: mean_velocity ~ 0.0025
+        - Grade 1: mean_velocity ~ 0.0133
+        - Grade 2: mean_velocity ~ 0.0319
+        - Grade 3: mean_velocity ~ 0.0624
         """
-        base_score = confidence * 100
+        # Asterixis가 아니면 Normal
+        if confidence < 0.5:
+            return confidence * 50  # 0-25 범위
 
-        # 속도 기반 가중치
-        velocities = features[:, 43:85]  # 속도 부분
-        velocity_magnitude = np.mean(np.abs(velocities))
+        # 전체 속도 magnitude (핵심 지표)
+        velocities = features[:, 43:85]
+        mean_velocity = np.mean(np.abs(velocities))
 
-        # 각도 변화량
-        angles = features[:, 42]
-        angle_change = np.std(angles)
+        # 전체 가속도 magnitude (보조 지표)
+        accelerations = features[:, 85:127]
+        mean_accel = np.mean(np.abs(accelerations))
 
-        # 가중치 적용
-        severity = base_score * (1 + 0.2 * velocity_magnitude * 10 + 0.1 * angle_change / 10)
-        severity = min(100, max(0, severity))
+        # Grade 판별 임계값 (데이터 분석 기반)
+        # Normal: < 0.008, Grade1: 0.008-0.022, Grade2: 0.022-0.045, Grade3: >= 0.045
+
+        if mean_velocity < 0.008:
+            # 움직임이 작음 - Asterixis로 감지되었지만 Normal에 가까움
+            # confidence가 높으면 Grade 1로
+            severity = 25 + (mean_velocity / 0.008) * 20  # 25-45 범위
+        elif mean_velocity < 0.022:
+            # Grade 1 범위
+            ratio = (mean_velocity - 0.008) / (0.022 - 0.008)
+            severity = 30 + ratio * 20  # 30-50 범위
+        elif mean_velocity < 0.045:
+            # Grade 2 범위
+            ratio = (mean_velocity - 0.022) / (0.045 - 0.022)
+            severity = 50 + ratio * 25  # 50-75 범위
+        else:
+            # Grade 3 범위
+            ratio = min(1.0, (mean_velocity - 0.045) / 0.03)
+            severity = 75 + ratio * 25  # 75-100 범위
+
+        # 가속도로 미세 조정 (±5)
+        accel_adjust = min(5, mean_accel * 50)
+        severity += accel_adjust
+
+        severity = min(100, max(25, severity))
 
         return severity
 
