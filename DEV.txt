@@ -1,0 +1,56 @@
+﻿Claude Code로 개발 환경 설정
+
+1단계: 프로젝트 디렉토리 생성
+mkdir ~/asterixis-detection
+cd ~/asterixis-detection
+
+2단계: Conda 가상환경 생성 및 활성화
+conda create -n asterixis python=3.10 -y
+conda activate asterixis
+
+3단계: 라이브러리 설치
+# PyTorch (CUDA 11.8)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# 필수 라이브러리
+pip install opencv-python mediapipe numpy pandas scikit-learn matplotlib seaborn tqdm tensorboard
+
+4단계: requirements.txt 생성
+pip freeze > requirements.txt
+
+5단계: Claude Code 실행
+conda activate asterixis
+cd ~/asterixis-detection
+claude
+Claude Code는 현재 활성화된 가상환경의 Python을 사용합니다. 반드시 conda activate asterixis 후 실행하세요.
+
+6단계: Claude Code에서 프로젝트 초기화
+Claude Code 실행 후 아래처럼 요청하시면 됩니다:
+프로젝트 구조를 만들어줘:
+- data/ : 영상 데이터
+- src/ : 소스 코드
+- models/ : 학습된 모델 저장
+- notebooks/ : 실험용
+- README.md 포함
+
+팁: CLAUDE.md 파일 생성
+프로젝트 루트에 CLAUDE.md를 만들어두면 Claude Code가 프로젝트 컨텍스트를 자동으로 인식합니다:
+# Asterixis Detection Project
+
+## 목적
+간성뇌증 환자의 asterixis(손떨림)를 영상에서 자동 검출
+
+## 기술 스택
+- Python 3.10, PyTorch, MediaPipe
+- CUDA 11.8, cuDNN 8.6
+
+## 데이터
+- 1,200개 영상 샘플 (Grade 0-4)
+- MediaPipe 손 랜드마크 추출
+
+## 주요 태스크
+- 손 랜드마크 시계열 추출
+- Grade 분류 모델 학습
+
+
+

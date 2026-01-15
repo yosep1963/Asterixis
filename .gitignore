@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Data files (large)
+data/asterixis_dataset/*.mp4
+processed_data/*.npy
+
+# Model files (large)
+models/*.pt
+models/*.h5
+
+# Keep directory structure
+!data/.gitkeep
+!data/asterixis_dataset/.gitkeep
+!processed_data/.gitkeep
+!models/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/*.ipynb
+
+# Logs
+runs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Captures
+captures/
+
+# Temp
+*.tmp
+torch
