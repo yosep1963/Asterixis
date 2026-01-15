@@ -10,12 +10,11 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from datetime import datetime
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, classification_report
 import seaborn as sns
 
-from .config import MODEL_DIR, TRAINING_CONFIG, PROCESSED_DIR
+from .config import MODEL_DIR, TRAINING_CONFIG, PROCESSED_DIR, LABELS
 from .dataset import load_data, get_dataloaders
 from .model import AsterixisModel, count_parameters
 
@@ -27,6 +26,10 @@ class Trainer:
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.model = model.to(self.device)
 
+        self._print_device_info()
+
+    def _print_device_info(self):
+        """디바이스 정보 출력"""
         print(f"\nDevice: {self.device}")
         if self.device.type == 'cuda':
             print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -57,9 +60,7 @@ class Trainer:
             total += batch_y.size(0)
             correct += (predicted == batch_y).sum().item()
 
-        avg_loss = total_loss / total
-        accuracy = correct / total
-        return avg_loss, accuracy
+        return total_loss / total, correct / total
 
     def validate(self, val_loader, criterion):
         """검증"""
@@ -86,9 +87,7 @@ class Trainer:
                 all_preds.extend(predicted.cpu().numpy())
                 all_labels.extend(batch_y.cpu().numpy())
 
-        avg_loss = total_loss / total
-        accuracy = correct / total
-        return avg_loss, accuracy, np.array(all_preds), np.array(all_labels)
+        return total_loss / total, correct / total, np.array(all_preds), np.array(all_labels)
 
     def train(
         self,
@@ -104,11 +103,7 @@ class Trainer:
         learning_rate = learning_rate or TRAINING_CONFIG["learning_rate"]
         patience = patience or TRAINING_CONFIG["early_stopping_patience"]
 
-        # 손실 함수 (클래스 가중치 적용)
-        pos_weight = torch.tensor([class_weights[1] / class_weights[0]]).to(self.device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-        # BCE Loss로 변경 (sigmoid가 모델에 포함됨)
+        # 손실 함수
         criterion = nn.BCELoss(reduction='mean')
 
         # Optimizer
@@ -137,13 +132,7 @@ class Trainer:
         patience_counter = 0
         best_model_path = MODEL_DIR / 'asterixis_best.pt'
 
-        print("\n" + "=" * 70)
-        print("Training Started")
-        print("=" * 70)
-        print(f"Epochs: {epochs}")
-        print(f"Learning rate: {learning_rate}")
-        print(f"Early stopping patience: {patience}")
-        print("=" * 70)
+        self._print_training_header(epochs, learning_rate, patience)
 
         for epoch in range(epochs):
             # 학습
@@ -180,13 +169,9 @@ class Trainer:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'val_loss': val_loss,
-                    'val_acc': val_acc,
-                }, best_model_path)
+                self._save_checkpoint(
+                    epoch, optimizer, val_loss, val_acc, best_model_path
+                )
                 print(f"  -> Model saved (val_loss: {val_loss:.4f})")
             else:
                 patience_counter += 1
@@ -200,6 +185,32 @@ class Trainer:
         checkpoint = torch.load(best_model_path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
 
+        self._print_training_summary(checkpoint, best_model_path)
+
+        return history, val_preds, val_labels
+
+    def _save_checkpoint(self, epoch, optimizer, val_loss, val_acc, path):
+        """체크포인트 저장"""
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+        }, path)
+
+    def _print_training_header(self, epochs, learning_rate, patience):
+        """학습 시작 헤더 출력"""
+        print("\n" + "=" * 70)
+        print("Training Started")
+        print("=" * 70)
+        print(f"Epochs: {epochs}")
+        print(f"Learning rate: {learning_rate}")
+        print(f"Early stopping patience: {patience}")
+        print("=" * 70)
+
+    def _print_training_summary(self, checkpoint, best_model_path):
+        """학습 완료 요약 출력"""
         print("\n" + "=" * 70)
         print("Training Complete!")
         print("=" * 70)
@@ -207,8 +218,6 @@ class Trainer:
         print(f"Best validation accuracy: {checkpoint['val_acc']:.4f}")
         print(f"Model saved: {best_model_path}")
         print("=" * 70)
-
-        return history, val_preds, val_labels
 
     def save_final_model(self, path=None):
         """최종 모델 저장 (추론용)"""
@@ -251,12 +260,13 @@ def plot_training_history(history, save_path=None):
 def plot_confusion_matrix(y_true, y_pred, save_path=None):
     """Confusion Matrix 시각화"""
     cm = confusion_matrix(y_true, y_pred)
+    label_names = [LABELS[0], LABELS[1]]
 
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(
         cm, annot=True, fmt='d', cmap='Blues',
-        xticklabels=['Normal', 'Asterixis'],
-        yticklabels=['Normal', 'Asterixis'],
+        xticklabels=label_names,
+        yticklabels=label_names,
         ax=ax
     )
     ax.set_title('Confusion Matrix', fontsize=14)
@@ -305,11 +315,9 @@ def main():
     plot_confusion_matrix(val_labels, val_preds, MODEL_DIR / 'confusion_matrix.png')
 
     # Classification Report
+    label_names = [LABELS[0], LABELS[1]]
     print("\nClassification Report:")
-    print(classification_report(
-        val_labels, val_preds,
-        target_names=['Normal', 'Asterixis']
-    ))
+    print(classification_report(val_labels, val_preds, target_names=label_names))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@ Asterixis Detection System - Configuration
 설정 파일: 하이퍼파라미터, 경로, 상수 정의
 """
 
-import os
 from pathlib import Path
 
 # =============================================================================
@@ -14,9 +13,10 @@ DATA_DIR = PROJECT_ROOT / "data" / "asterixis_dataset"
 PROCESSED_DIR = PROJECT_ROOT / "processed_data"
 MODEL_DIR = PROJECT_ROOT / "models"
 CAPTURE_DIR = PROJECT_ROOT / "captures"
+LOG_DIR = PROJECT_ROOT / "logs"
 
 # 디렉토리 자동 생성
-for dir_path in [DATA_DIR, PROCESSED_DIR, MODEL_DIR, CAPTURE_DIR]:
+for dir_path in [DATA_DIR, PROCESSED_DIR, MODEL_DIR, CAPTURE_DIR, LOG_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
@@ -29,12 +29,27 @@ MEDIAPIPE_CONFIG = {
     "min_tracking_confidence": 0.7,
 }
 
+# 실시간 Detection용 MediaPipe 설정 (더 낮은 threshold)
+MEDIAPIPE_REALTIME_CONFIG = {
+    "static_image_mode": False,
+    "max_num_hands": 2,
+    "min_detection_confidence": 0.7,
+    "min_tracking_confidence": 0.5,
+}
+
 # =============================================================================
 # 카메라 설정
 # =============================================================================
 CAMERA_CONFIG = {
     "width": 1920,          # Full HD
     "height": 1080,
+    "fps": 30,
+}
+
+# 실시간 Detection용 카메라 설정
+CAMERA_REALTIME_CONFIG = {
+    "width": 1280,
+    "height": 720,
     "fps": 30,
 }
 
@@ -47,6 +62,12 @@ ANGLE_DIM = 1               # 손목 각도
 VELOCITY_DIM = 42           # 속도 (42차원)
 ACCELERATION_DIM = 42       # 가속도 (42차원)
 FEATURE_DIM = COORD_DIM + ANGLE_DIM + VELOCITY_DIM + ACCELERATION_DIM  # 127
+
+# Feature 인덱스
+VELOCITY_START_IDX = COORD_DIM + ANGLE_DIM  # 43
+VELOCITY_END_IDX = VELOCITY_START_IDX + VELOCITY_DIM  # 85
+ACCEL_START_IDX = VELOCITY_END_IDX  # 85
+ACCEL_END_IDX = ACCEL_START_IDX + ACCELERATION_DIM  # 127
 
 # =============================================================================
 # 윈도우 설정
@@ -86,13 +107,49 @@ TRAINING_CONFIG = {
 }
 
 # =============================================================================
-# Severity Score 임계값
+# Severity 판별 설정
 # =============================================================================
+# Confidence 임계값
+CONFIDENCE_THRESHOLD = 0.5
+
+# Grade 판별을 위한 mean_velocity 임계값 (실제 데이터 분석 결과)
+# Normal: ~0.0025, Grade1: ~0.0133, Grade2: ~0.0319, Grade3: ~0.0624
+VELOCITY_THRESHOLDS = {
+    "grade1_min": 0.008,    # Grade 1 시작
+    "grade2_min": 0.022,    # Grade 2 시작
+    "grade3_min": 0.045,    # Grade 3 시작
+}
+
+# Severity Score 범위
 SEVERITY_THRESHOLDS = {
     "normal": 25,           # 0-25: Normal
     "grade1": 50,           # 25-50: Grade 1 (Mild)
     "grade2": 75,           # 50-75: Grade 2 (Moderate)
     "grade3": 100,          # 75-100: Grade 3 (Severe)
+}
+
+# =============================================================================
+# Detection 설정
+# =============================================================================
+DETECTION_CONFIG = {
+    "severity_history_size": 300,   # 10초 (30fps 기준)
+    "fps_history_size": 30,
+    "auto_capture_cooldown": 3.0,   # 초
+    "auto_capture_threshold": 50,   # Severity 이상일 때 캡처
+}
+
+# =============================================================================
+# UI 색상 설정
+# =============================================================================
+COLORS = {
+    "normal": (0, 255, 0),      # Green
+    "grade1": (0, 255, 255),    # Yellow
+    "grade2": (0, 165, 255),    # Orange
+    "grade3": (0, 0, 255),      # Red
+    "hand_detected": (0, 255, 0),
+    "hand_not_found": (0, 0, 255),
+    "white": (255, 255, 255),
+    "black": (0, 0, 0),
 }
 
 # =============================================================================

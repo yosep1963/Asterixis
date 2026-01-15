@@ -4,35 +4,31 @@ Asterixis Detection System - Real-time Detector
 """
 
 import cv2
-import mediapipe as mp
 import numpy as np
 import torch
 from collections import deque
 from pathlib import Path
 import time
-from datetime import datetime
 
 from .config import (
-    MODEL_DIR, CAMERA_CONFIG, MEDIAPIPE_CONFIG,
-    WINDOW_SIZE, FEATURE_DIM, SEVERITY_THRESHOLDS,
-    CAPTURE_DIR
+    MODEL_DIR, CAMERA_REALTIME_CONFIG, WINDOW_SIZE,
+    CAPTURE_DIR, DETECTION_CONFIG, COLORS,
+    VELOCITY_START_IDX, VELOCITY_END_IDX
 )
 from .model import AsterixisModel
 from .preprocessor import Preprocessor
+from .utils import (
+    MediaPipeHandler, UIDrawer, CameraManager,
+    SeverityCalculator, save_screenshot, create_timestamp
+)
 
 
 class RealtimeDetector:
     """실시간 Asterixis 감지 시스템"""
 
     def __init__(self, model_path=None):
-        # MediaPipe 초기화
-        mp_config = MEDIAPIPE_CONFIG.copy()
-        mp_config["min_detection_confidence"] = 0.7
-        mp_config["min_tracking_confidence"] = 0.5
-
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(**mp_config)
-        self.mp_draw = mp.solutions.drawing_utils
+        # MediaPipe 초기화 (실시간용 설정)
+        self.mp_handler = MediaPipeHandler(realtime=True)
 
         # 모델 로드
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -46,17 +42,20 @@ class RealtimeDetector:
         self.angles_buffer = deque(maxlen=WINDOW_SIZE)
 
         # Severity 히스토리 (그래프용)
-        self.severity_history = deque(maxlen=300)  # 10초
+        self.severity_history = deque(maxlen=DETECTION_CONFIG["severity_history_size"])
 
         # FPS 계산
-        self.fps_buffer = deque(maxlen=30)
+        self.fps_buffer = deque(maxlen=DETECTION_CONFIG["fps_history_size"])
         self.last_time = time.time()
 
         # Auto-capture 설정
         self.capture_dir = CAPTURE_DIR
         self.last_capture_time = 0
-        self.capture_cooldown = 3.0  # 초
 
+        self._print_device_info()
+
+    def _print_device_info(self):
+        """디바이스 정보 출력"""
         print(f"\nDevice: {self.device}")
         if self.device.type == 'cuda':
             print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -83,8 +82,8 @@ class RealtimeDetector:
 
     def _extract_127_features(self):
         """버퍼에서 127-feature 추출"""
-        coords = np.array(list(self.coords_buffer))      # (15, 42)
-        angles = np.array(list(self.angles_buffer)).reshape(-1, 1)  # (15, 1)
+        coords = np.array(list(self.coords_buffer))
+        angles = np.array(list(self.angles_buffer)).reshape(-1, 1)
 
         # 속도 계산 (1차 미분)
         velocities = np.zeros_like(coords)
@@ -95,95 +94,28 @@ class RealtimeDetector:
         accelerations[1:] = velocities[1:] - velocities[:-1]
 
         # 결합
-        features = np.concatenate([
+        return np.concatenate([
             coords, angles, velocities, accelerations
-        ], axis=1)  # (15, 127)
-
-        return features
-
-    def _calculate_severity(self, confidence, features):
-        """
-        Severity Score 계산 (0-100)
-        - 0-25: Normal
-        - 25-50: Grade 1 (Mild)
-        - 50-75: Grade 2 (Moderate)
-        - 75-100: Grade 3 (Severe)
-
-        Grade는 mean_velocity 기반으로 판별 (실제 데이터 분석 결과):
-        - Normal: mean_velocity ~ 0.0025
-        - Grade 1: mean_velocity ~ 0.0133
-        - Grade 2: mean_velocity ~ 0.0319
-        - Grade 3: mean_velocity ~ 0.0624
-        """
-        # Asterixis가 아니면 Normal
-        if confidence < 0.5:
-            return confidence * 50  # 0-25 범위
-
-        # 전체 속도 magnitude (핵심 지표)
-        velocities = features[:, 43:85]
-        mean_velocity = np.mean(np.abs(velocities))
-
-        # 전체 가속도 magnitude (보조 지표)
-        accelerations = features[:, 85:127]
-        mean_accel = np.mean(np.abs(accelerations))
-
-        # Grade 판별 임계값 (데이터 분석 기반)
-        # Normal: < 0.008, Grade1: 0.008-0.022, Grade2: 0.022-0.045, Grade3: >= 0.045
-
-        if mean_velocity < 0.008:
-            # 움직임이 작음 - Asterixis로 감지되었지만 Normal에 가까움
-            # confidence가 높으면 Grade 1로
-            severity = 25 + (mean_velocity / 0.008) * 20  # 25-45 범위
-        elif mean_velocity < 0.022:
-            # Grade 1 범위
-            ratio = (mean_velocity - 0.008) / (0.022 - 0.008)
-            severity = 30 + ratio * 20  # 30-50 범위
-        elif mean_velocity < 0.045:
-            # Grade 2 범위
-            ratio = (mean_velocity - 0.022) / (0.045 - 0.022)
-            severity = 50 + ratio * 25  # 50-75 범위
-        else:
-            # Grade 3 범위
-            ratio = min(1.0, (mean_velocity - 0.045) / 0.03)
-            severity = 75 + ratio * 25  # 75-100 범위
-
-        # 가속도로 미세 조정 (±5)
-        accel_adjust = min(5, mean_accel * 50)
-        severity += accel_adjust
-
-        severity = min(100, max(25, severity))
-
-        return severity
-
-    def _get_severity_info(self, severity):
-        """Severity에 따른 정보"""
-        if severity < SEVERITY_THRESHOLDS["normal"]:
-            return "Normal", (0, 255, 0)  # Green
-        elif severity < SEVERITY_THRESHOLDS["grade1"]:
-            return "Grade 1 (Mild)", (0, 255, 255)  # Yellow
-        elif severity < SEVERITY_THRESHOLDS["grade2"]:
-            return "Grade 2 (Moderate)", (0, 165, 255)  # Orange
-        else:
-            return "Grade 3 (Severe)", (0, 0, 255)  # Red
+        ], axis=1)
 
     def _auto_capture(self, frame, severity):
         """Asterixis 감지 시 자동 캡처"""
         current_time = time.time()
+        cooldown = DETECTION_CONFIG["auto_capture_cooldown"]
+        threshold = DETECTION_CONFIG["auto_capture_threshold"]
 
-        if current_time - self.last_capture_time < self.capture_cooldown:
+        if current_time - self.last_capture_time < cooldown:
             return None
 
-        if severity < 50:
+        if severity < threshold:
             return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"asterixis_severity{int(severity)}_{timestamp}.jpg"
-        filepath = self.capture_dir / filename
-
-        cv2.imwrite(str(filepath), frame)
+        filepath = save_screenshot(
+            frame, self.capture_dir,
+            prefix=f"asterixis_severity{int(severity)}"
+        )
         self.last_capture_time = current_time
-
-        print(f"Auto-captured: {filename}")
+        print(f"Auto-captured: {filepath.name}")
         return filepath
 
     def _draw_severity_graph(self, frame):
@@ -197,18 +129,10 @@ class RealtimeDetector:
         graph_x = w - graph_width - 20
         graph_y = h - graph_height - 20
 
-        # 배경
-        overlay = frame.copy()
-        cv2.rectangle(overlay,
-                     (graph_x, graph_y),
-                     (graph_x + graph_width, graph_y + graph_height),
-                     (0, 0, 0), -1)
-        frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
-
-        cv2.rectangle(frame,
-                     (graph_x, graph_y),
-                     (graph_x + graph_width, graph_y + graph_height),
-                     (255, 255, 255), 1)
+        # 배경 패널
+        frame = UIDrawer.draw_info_panel(
+            frame, graph_x, graph_y, graph_width, graph_height
+        )
 
         # 그래프 그리기
         history = list(self.severity_history)
@@ -220,20 +144,21 @@ class RealtimeDetector:
             points.append((x, y))
 
         for i in range(len(points) - 1):
-            _, color = self._get_severity_info(history[i])
+            _, color = SeverityCalculator.get_severity_info(history[i])
             cv2.line(frame, points[i], points[i+1], color, 2)
 
         # 레이블
-        cv2.putText(frame, "Severity (10s)",
-                   (graph_x + 5, graph_y - 5),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        UIDrawer.draw_text(
+            frame, "Severity (10s)",
+            (graph_x + 5, graph_y - 5), font_scale=0.5
+        )
 
         return frame
 
     def process_frame(self, frame):
         """프레임 처리 및 예측"""
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(frame_rgb)
+        results = self.mp_handler.process(frame_rgb)
 
         prediction = None
         confidence = 0.0
@@ -245,12 +170,7 @@ class RealtimeDetector:
             hand_detected = True
 
             # 랜드마크 그리기
-            self.mp_draw.draw_landmarks(
-                frame, hand,
-                self.mp_hands.HAND_CONNECTIONS,
-                self.mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
-                self.mp_draw.DrawingSpec(color=(0, 0, 255), thickness=2)
-            )
+            self.mp_handler.draw_landmarks(frame, hand)
 
             # 정규화된 좌표 추출
             normalized = self.preprocessor.normalize_landmarks(hand.landmark)
@@ -272,16 +192,45 @@ class RealtimeDetector:
                         confidence = output.item()
 
                     # Severity 계산
-                    severity = self._calculate_severity(confidence, features)
+                    severity = SeverityCalculator.calculate_severity(confidence, features)
                     self.severity_history.append(severity)
 
                     # 예측 결과
-                    if confidence > 0.5:
-                        prediction = "Asterixis: YES"
-                    else:
-                        prediction = "Asterixis: NO"
+                    prediction = "Asterixis: YES" if confidence > 0.5 else "Asterixis: NO"
 
         return frame, prediction, confidence, severity, hand_detected
+
+    def _draw_main_ui(self, frame, prediction, severity, hand_detected, avg_fps):
+        """메인 UI 그리기"""
+        grade_text, color = SeverityCalculator.get_severity_info(severity)
+
+        # 메인 정보 패널
+        frame = UIDrawer.draw_info_panel(frame, 10, 10, 440, 190, color)
+
+        # FPS
+        UIDrawer.draw_fps(frame, avg_fps)
+
+        # 손 감지 상태
+        UIDrawer.draw_hand_status(frame, hand_detected)
+
+        # 버퍼 상태
+        UIDrawer.draw_buffer_status(frame, len(self.coords_buffer), WINDOW_SIZE)
+
+        # 예측 결과
+        if prediction:
+            UIDrawer.draw_text(frame, prediction, (20, 140), font_scale=1.0, color=color)
+            UIDrawer.draw_text(
+                frame, f"Severity: {severity:.1f}/100",
+                (20, 170), font_scale=0.8, color=color
+            )
+            UIDrawer.draw_text(frame, grade_text, (20, 195), font_scale=0.6, color=color)
+        else:
+            UIDrawer.draw_text(
+                frame, "Analyzing...",
+                (20, 140), font_scale=1.0, color=COLORS["grade1"]
+            )
+
+        return frame
 
     def run(self):
         """실시간 감지 시작"""
@@ -289,13 +238,51 @@ class RealtimeDetector:
             print("Model not loaded. Exiting.")
             return
 
-        cap = cv2.VideoCapture(0)
+        with CameraManager(
+            width=CAMERA_REALTIME_CONFIG["width"],
+            height=CAMERA_REALTIME_CONFIG["height"],
+            fps=CAMERA_REALTIME_CONFIG["fps"]
+        ) as cam:
+            self._print_controls()
 
-        # 카메라 설정
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+            while True:
+                ret, frame = cam.read()
+                if not ret:
+                    print("Failed to capture frame")
+                    break
 
+                # FPS 계산
+                current_time = time.time()
+                fps = 1 / (current_time - self.last_time) if self.last_time else 0
+                self.fps_buffer.append(fps)
+                avg_fps = np.mean(self.fps_buffer)
+                self.last_time = current_time
+
+                # 프레임 처리
+                frame, prediction, confidence, severity, hand_detected = self.process_frame(frame)
+
+                # UI 그리기
+                frame = self._draw_main_ui(frame, prediction, severity, hand_detected, avg_fps)
+
+                # Auto-capture
+                if prediction:
+                    self._auto_capture(frame, severity)
+
+                # Severity 그래프
+                frame = self._draw_severity_graph(frame)
+
+                # 화면 표시
+                cv2.imshow('Asterixis Detection v2.0', frame)
+
+                # 키 입력 처리
+                if self._handle_key_input(frame):
+                    break
+
+        cv2.destroyAllWindows()
+        print("Detection stopped")
+
+    def _print_controls(self):
+        """컨트롤 안내 출력"""
         print("\n" + "=" * 70)
         print("Real-time Asterixis Detection System v2.0")
         print("=" * 70)
@@ -308,91 +295,28 @@ class RealtimeDetector:
         print("  R - Reset history")
         print("=" * 70 + "\n")
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to capture frame")
-                break
+    def _handle_key_input(self, frame):
+        """키 입력 처리. 종료 시 True 반환"""
+        key = cv2.waitKey(1) & 0xFF
 
-            # FPS 계산
-            current_time = time.time()
-            fps = 1 / (current_time - self.last_time) if self.last_time else 0
-            self.fps_buffer.append(fps)
-            avg_fps = np.mean(self.fps_buffer)
-            self.last_time = current_time
+        if key == ord('q'):
+            print("\nExiting...")
+            return True
+        elif key == ord('s'):
+            filepath = save_screenshot(frame, self.capture_dir, prefix="manual")
+            print(f"Manual capture: {filepath.name}")
+        elif key == ord('r'):
+            self.severity_history.clear()
+            self.coords_buffer.clear()
+            self.angles_buffer.clear()
+            print("History reset")
 
-            # 프레임 처리
-            frame, prediction, confidence, severity, hand_detected = self.process_frame(frame)
+        return False
 
-            # UI 그리기
-            h, w = frame.shape[:2]
-
-            # 메인 정보 패널
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (10, 10), (450, 200), (0, 0, 0), -1)
-            frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
-
-            grade_text, color = self._get_severity_info(severity)
-            cv2.rectangle(frame, (10, 10), (450, 200), color, 2)
-
-            # FPS
-            cv2.putText(frame, f"FPS: {avg_fps:.1f}",
-                       (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-            # 손 감지 상태
-            hand_status = "Hand: Detected" if hand_detected else "Hand: Not Found"
-            hand_color = (0, 255, 0) if hand_detected else (0, 0, 255)
-            cv2.putText(frame, hand_status,
-                       (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, hand_color, 2)
-
-            # 버퍼 상태
-            buffer_status = f"Buffer: {len(self.coords_buffer)}/{WINDOW_SIZE}"
-            cv2.putText(frame, buffer_status,
-                       (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-            # 예측 결과
-            if prediction:
-                cv2.putText(frame, prediction,
-                           (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
-
-                cv2.putText(frame, f"Severity: {severity:.1f}/100",
-                           (20, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-                cv2.putText(frame, grade_text,
-                           (20, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-                # Auto-capture
-                self._auto_capture(frame, severity)
-            else:
-                cv2.putText(frame, "Analyzing...",
-                           (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
-
-            # Severity 그래프
-            frame = self._draw_severity_graph(frame)
-
-            # 화면 표시
-            cv2.imshow('Asterixis Detection v2.0', frame)
-
-            # 키 입력
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("\nExiting...")
-                break
-            elif key == ord('s'):
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"manual_{timestamp}.jpg"
-                filepath = self.capture_dir / filename
-                cv2.imwrite(str(filepath), frame)
-                print(f"Manual capture: {filename}")
-            elif key == ord('r'):
-                self.severity_history.clear()
-                self.coords_buffer.clear()
-                self.angles_buffer.clear()
-                print("History reset")
-
-        cap.release()
-        cv2.destroyAllWindows()
-        print("Detection stopped")
+    def __del__(self):
+        """리소스 해제"""
+        if hasattr(self, 'mp_handler'):
+            self.mp_handler.release()
 
 
 def main():
